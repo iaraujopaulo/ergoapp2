@@ -1,0 +1,9 @@
+mediapipe
+opencv-python
+numpy
+pandas
+openpyxl
+reportlab
+streamlit
+streamlit-webrtc
+av

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ErgoApp – Análise ergonômica RULA</title>
+<style>
+:root{--bg:#0f1220;--card:#181c30;--tx:#e8ebff;--mut:#8b93b8;--ac:#7c5cff;--ok:#3ddc84;--wa:#ffd23f;--or:#ff9a3d;--re:#ff4d5e}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{padding:16px 24px;font-size:1.3rem;font-weight:700}header span{color:var(--ac)}
+main{display:grid;grid-template-columns:2fr 1fr;gap:16px;padding:0 24px 24px}@media(max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border-radius:14px;padding:14px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+button,label.b{background:var(--ac);color:#fff;border:0;border-radius:10px;padding:9px 14px;cursor:pointer;font-size:.9rem}
+button.s{background:#2a2f4d}input[type=file]{display:none}
+canvas{width:100%;border-radius:10px;background:#000;display:block}video{display:none}
+#score{font-size:3rem;font-weight:800;text-align:center}#risk{text-align:center;margin-bottom:10px}
+table{width:100%;border-collapse:collapse;font-size:.9rem}td{padding:5px 2px;border-bottom:1px solid #262b49}td+td{text-align:right}
+small{color:var(--mut)}.f{width:100%;margin:3px 0;padding:8px;border-radius:8px;border:0;background:#262b49;color:var(--tx)}
+</style><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head><body>
+<header>Ergo<span>App</span> · RULA com MediaPipe</header>
+<main>
+<section class="card">
+ <div class="bar">
+  <label class="b">Foto<input id="fImg" type="file" accept="image/*"></label>
+  <label class="b">Vídeo<input id="fVid" type="file" accept="video/*"></label>
+  <button id="cam">Câmera</button><button id="stop" class="s">Parar</button>
+  <label><small>Força/carga</small> <select id="force"><option>0</option><option>1</option><option>2</option><option>3</option></select></label>
+  <label><small><input type="checkbox" id="stat"> postura estática/repetitiva</small></label>
+  <label><small><input type="checkbox" id="raised"> ombro elevado</small></label>
+  <label><small><input type="checkbox" id="supp"> braço apoiado</small></label>
+  <label><small><input type="checkbox" id="wdev"> desvio do punho</small></label>
+  <label><small>giro do punho</small> <select id="twist"><option>1</option><option>2</option></select></label>
+ </div>
+ <canvas id="c2d" width="960" height="540"></canvas><video id="v" playsinline muted></video>
+ <small id="status">Carregando modelo…</small>
+</section>
+<aside class="card">
+ <div id="score">–</div><div id="risk">Envie uma foto, vídeo ou use a câmera</div>
+ <table id="tbl"></table>
+ <h4>Identificação do laudo</h4>
+ <input class="f" id="emp" placeholder="Empresa"><input class="f" id="set" placeholder="Setor/posto"><input class="f" id="trab" placeholder="Trabalhador avaliado"><input class="f" id="aval" placeholder="Avaliador">
+ <div class="bar" style="margin-top:8px"><button id="xl">Excel</button><button id="pdf">PDF</button><button id="laudo">Laudo ergonômico</button></div>
+ <h4>Esqueleto 3D <small>(arraste o controle)</small></h4>
+ <canvas id="c3d" width="320" height="320"></canvas>
+ <input id="yaw" type="range" min="-180" max="180" value="20" style="width:100%">
+</aside>
+</main>
+<script type="module">
+import {PoseLandmarker,FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.mjs";
+const $=id=>document.getElementById(id), deg=r=>r*180/Math.PI;
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const mul=(a,k)=>a.map(x=>x*k), len=a=>Math.hypot(...a), unit=a=>{const n=len(a);return n>1e-9?mul(a,1/n):a};
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const mid=(a,b)=>mul([a[0]+b[0],a[1]+b[1],a[2]+b[2]],.5), hz=v=>unit([v[0],0,v[2]]);
+const cl=x=>Math.max(-1,Math.min(1,x)), angAt=(a,b,c)=>deg(Math.acos(cl(dot(unit(sub(a,b)),unit(sub(c,b))))));
+const yaw=(a,b)=>deg(Math.acos(cl(dot(hz(a),hz(b)))));
+const IDX={nose:0,ear_l:7,ear_r:8,sh_l:11,sh_r:12,el_l:13,el_r:14,wr_l:15,wr_r:16,pk_l:17,pk_r:18,ix_l:19,ix_r:20,hip_l:23,hip_r:24,kn_l:25,kn_r:26,an_l:27,an_r:28};
+const BONES=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28],[15,19],[16,20],[0,7],[0,8],[7,8]];
+const TA=[[[1,2,2,2,2,3,3,3],[2,2,2,2,3,3,3,3],[2,3,3,3,3,4,4,4]],[[2,3,3,3,3,4,4,4],[3,3,3,3,3,4,4,4],[3,4,4,4,4,4,5,5]],
+[[3,3,4,4,4,4,5,5],[3,4,4,4,4,4,5,5],[4,4,4,4,4,5,5,5]],[[4,4,4,4,4,5,5,5],[4,4,4,4,4,5,5,5],[4,4,4,5,5,5,6,6]],
+[[5,5,5,5,5,6,6,7],[5,6,6,6,6,6,7,7],[6,6,6,7,7,7,7,8]],[[7,7,7,7,7,8,8,9],[8,8,8,8,8,9,9,9],[9,9,9,9,9,9,9,9]]];
+const TB=[[[1,3],[2,3],[3,4],[5,5],[6,6],[7,7]],[[2,3],[2,3],[4,5],[5,5],[6,7],[7,7]],[[3,3],[3,4],[4,5],[5,6],[6,7],[7,7]],
+[[5,5],[5,6],[6,7],[7,7],[7,7],[8,8]],[[7,7],[7,7],[7,8],[8,8],[8,8],[8,8]],[[8,8],[8,8],[8,8],[8,9],[9,9],[9,9]]];
+const TC=[[1,2,3,3,4,5,5],[2,2,3,4,4,5,5],[3,3,3,4,4,5,6],[3,3,3,4,5,6,6],[4,4,4,5,6,7,7],[4,4,5,6,6,7,7],[5,5,6,6,7,7,7],[5,5,6,7,7,7,7]];
+const RISK=["","Aceitável","Aceitável","Investigar mais","Investigar mais","Investigar e mudar em breve","Investigar e mudar em breve","Investigar e mudar já"];
+const COL=["","#3ddc84","#3ddc84","#ffd23f","#ffd23f","#ff9a3d","#ff9a3d","#ff4d5e"];
+
+function cruzar(ua,la,wr,tw,neck,trunk,legs,muscle,force){
+  const pA=TA[Math.min(ua,6)-1][Math.min(la,3)-1][(Math.min(wr,4)-1)*2+tw-1];   // Tabela A
+  const A=pA+muscle+force;                                                       // escore A
+  const pB=TB[Math.min(neck,6)-1][Math.min(trunk,6)-1][legs-1];                  // Tabela B
+  const B=pB+muscle+force;                                                       // escore B
+  const final=TC[Math.min(A,8)-1][Math.min(B,7)-1];                              // Tabela C
+  return {pA,A,pB,B,final,muscle,force};
+}
+function rula(P,lm,force,stat){
+  const O={raised:$("raised").checked,supp:$("supp").checked,wdev:$("wdev").checked,twist:+$("twist").value};
+  const shM=mid(P.sh_l,P.sh_r), hipM=mid(P.hip_l,P.hip_r), torso=len(sub(shM,hipM));
+  const view=Math.abs(P.sh_l[0]-P.sh_r[0])/Math.max(torso,1e-6)<.35?"lado":(lm[11].x>lm[12].x?"frente":"costas");
+  const up=unit(sub(shM,hipM)); let lat=sub(P.sh_l,P.sh_r); lat=unit(sub(lat,mul(up,dot(lat,up))));
+  let fwd=unit(cross(lat,up)); if(dot(fwd,sub(P.nose,mid(P.ear_l,P.ear_r)))<0) fwd=mul(fwd,-1); lat=unit(cross(up,fwd));
+  let sides=["l","r"]; if(view==="lado") sides=[lm[11].visibility>=lm[12].visibility?"l":"r"];
+  let best=null;
+  for(const s of sides){
+    const sh=P["sh_"+s],el=P["el_"+s],wr=P["wr_"+s], d=unit(sub(el,sh));
+    const flex=deg(Math.atan2(dot(d,fwd),-dot(d,up)));
+    let ua=flex<-20?2:flex<=20?1:flex<=45?2:flex<=90?3:4;
+    const abd=deg(Math.atan2(Math.abs(dot(d,lat)),-dot(d,up))); if(abd>30) ua++; if(O.raised) ua++; if(O.supp) ua--; ua=Math.max(ua,1);
+    const elbow=angAt(sh,el,wr); let la=elbow>=60&&elbow<=100?1:2;
+    const out=mul(lat,Math.sign(dot(sub(sh,shM),lat))), off=dot(sub(wr,hipM),out), sw=len(sub(P.sh_l,P.sh_r));
+    if(off<0||off>sw*1.2) la=Math.min(la+1,3);
+    const hand=mid(P["ix_"+s],P["pk_"+s]), dev=deg(Math.acos(cl(dot(unit(sub(hand,wr)),unit(sub(wr,el))))));
+    const wr_=Math.min((dev<5?1:dev<=15?2:3)+(O.wdev?1:0),4), a=TA[Math.min(ua,6)-1][la-1][(wr_-1)*2+O.twist-1];
+    if(!best||a>best.a) best={a,ua,la,wr:wr_,tw:O.twist,s,flex,elbow,dev};
+  }
+  const h=unit(sub(mid(P.ear_l,P.ear_r),shM)), nflex=deg(Math.atan2(dot(h,fwd),dot(h,up)));
+  let neck=nflex<-5?4:nflex<10?1:nflex<20?2:3;
+  if(deg(Math.atan2(Math.abs(dot(h,lat)),dot(h,up)))>15) neck++;
+  if(yaw(sub(P.ear_l,P.ear_r),sub(P.sh_l,P.sh_r))>20) neck++;
+  const vup=[0,-1,0], fh=hz(fwd), lh=hz(lat), tfl=deg(Math.atan2(dot(up,fh),dot(up,vup))), at=Math.abs(tfl);
+  let trunk=at<5?1:at<=20?2:at<=60?3:4;
+  if(deg(Math.atan2(Math.abs(dot(up,lh)),dot(up,vup)))>10) trunk++;
+  if(yaw(sub(P.sh_l,P.sh_r),sub(P.hip_l,P.hip_r))>20) trunk++;
+  neck=Math.min(neck,6); trunk=Math.min(trunk,6);
+  const legs=Math.abs(P.an_l[1]-P.an_r[1])<.10?1:2;
+  const cz=cruzar(best.ua,best.la,best.wr,best.tw,neck,trunk,legs,stat?1:0,force);
+  return {view,side:best.s,...best,neck,trunk,legs,...cz,nflex,tfl};
+}
+const hist=[];let pl,mode="",raf=0,stream=null;
+const c2=$("c2d"),x2=c2.getContext("2d"),c3=$("c3d"),x3=c3.getContext("2d"),v=$("v"),st=$("status");
+async function init(){
+  const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm");
+  pl=await PoseLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",delegate:"GPU"},runningMode:"IMAGE",numPoses:1});
+  st.textContent="Pronto.";
+}
+async function setMode(m){ if(mode!==m){await pl.setOptions({runningMode:m});mode=m;} }
+function analyse(res,src,w,h){
+  c2.width=w;c2.height=h;x2.drawImage(src,0,0,w,h);
+  if(!res.landmarks.length){$("score").textContent="–";$("risk").textContent="Nenhuma pessoa detectada";return;}
+  const lm=res.landmarks[0],wl=res.worldLandmarks[0],P={};
+  for(const k in IDX)P[k]=[wl[IDX[k]].x,wl[IDX[k]].y,wl[IDX[k]].z];
+  const r=rula(P,lm,+$("force").value,$("stat").checked), col=COL[r.final];
+  x2.lineWidth=Math.max(2,w/400);x2.strokeStyle=col;
+  for(const[a,b]of BONES){x2.beginPath();x2.moveTo(lm[a].x*w,lm[a].y*h);x2.lineTo(lm[b].x*w,lm[b].y*h);x2.stroke();}
+  x2.fillStyle="#fff";for(const p of lm){x2.beginPath();x2.arc(p.x*w,p.y*h,x2.lineWidth*1.3,0,7);x2.fill();}
+  window._r=r;if(hist.length<5000)hist.push({t:+(src===v?v.currentTime:0).toFixed(2),view:r.view,final:r.final,A:r.A,B:r.B,ua:r.ua,la:r.la,wr:r.wr,neck:r.neck,trunk:r.trunk,legs:r.legs});
+  $("score").textContent=r.final;$("score").style.color=col;$("risk").textContent=RISK[r.final];
+  $("tbl").innerHTML=[["Vista",r.view+" ("+r.side.toUpperCase()+")"],["Braço",r.ua],["Antebraço",r.la],["Punho",r.wr],["Tabela A",r.pA],["Escore A (+uso/carga)",r.A],
+   ["Pescoço",r.neck],["Tronco",r.trunk],["Pernas",r.legs],["Tabela B",r.pB],["Escore B (+uso/carga)",r.B],["Tabela C (A x B)",r.final],["Flexão braço",r.flex.toFixed(0)+"°"],
+   ["Cotovelo",r.elbow.toFixed(0)+"°"],["Pescoço",r.nflex.toFixed(0)+"°"],["Tronco",r.tfl.toFixed(0)+"°"]].map(x=>`<tr><td>${x[0]}</td><td>${x[1]}</td></tr>`).join("");
+  window._wl=wl;draw3d(col);
+}
+function draw3d(col){
+  const wl=window._wl;if(!wl)return;const a=deg0($("yaw").value),ca=Math.cos(a),sa=Math.sin(a);
+  x3.fillStyle="#0a0c18";x3.fillRect(0,0,320,320);x3.strokeStyle=col||"#7c5cff";x3.lineWidth=3;
+  const pt=p=>{const x=p.x*ca+p.z*sa;return[160+x*220,170+p.y*220];};
+  for(const[i,j]of BONES){const A=pt(wl[i]),B=pt(wl[j]);x3.beginPath();x3.moveTo(...A);x3.lineTo(...B);x3.stroke();}
+}
+const deg0=d=>d*Math.PI/180; $("yaw").oninput=()=>draw3d();
+function stopAll(){cancelAnimationFrame(raf);if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}v.pause();v.removeAttribute("src");v.srcObject=null;}
+function loop(){ if(v.readyState>=2){analyse(pl.detectForVideo(v,performance.now()),v,v.videoWidth,v.videoHeight);} raf=requestAnimationFrame(loop); }
+$("fImg").onchange=async e=>{stopAll();hist.length=0;await setMode("IMAGE");const img=new Image();img.onload=()=>analyse(pl.detect(img),img,img.naturalWidth,img.naturalHeight);img.src=URL.createObjectURL(e.target.files[0]);};
+$("fVid").onchange=async e=>{stopAll();hist.length=0;await setMode("VIDEO");v.src=URL.createObjectURL(e.target.files[0]);v.loop=true;await v.play();loop();};
+$("cam").onclick=async()=>{stopAll();hist.length=0;await setMode("VIDEO");stream=await navigator.mediaDevices.getUserMedia({video:{width:1280,height:720}});v.srcObject=stream;await v.play();loop();};
+$("stop").onclick=stopAll;
+// ---------- Exportação: Excel, PDF e laudo ----------
+const RT=["","Postura aceitável, desde que não seja mantida ou repetida por longos períodos.","Postura aceitável, desde que não seja mantida ou repetida por longos períodos.","São necessárias investigações adicionais; mudanças podem ser necessárias.","São necessárias investigações adicionais; mudanças podem ser necessárias.","São necessárias investigação e mudanças em breve.","São necessárias investigação e mudanças em breve.","São necessárias investigação e mudanças imediatas."];
+const info=()=>({emp:$("emp").value||"-",set:$("set").value||"-",trab:$("trab").value||"-",aval:$("aval").value||"-",data:new Date().toLocaleString("pt-BR")});
+const need=()=>window._r||(alert("Faça uma análise antes de exportar."),null);
+const steps=r=>[["Braço (com ajustes)",r.ua],["Antebraço",r.la],["Punho (com desvio)",r.wr],["Giro do punho",r.tw],["Tabela A",r.pA],["Uso muscular",r.muscle],["Força/carga",r.force],["Escore A (Tabela A + uso + carga)",r.A],["Pescoço",r.neck],["Tronco",r.trunk],["Pernas",r.legs],["Tabela B",r.pB],["Escore B (Tabela B + uso + carga)",r.B],["Escore final - Tabela C (A x B)",r.final]];
+function stats(){if(hist.length<2)return null;const f=hist.map(h=>h.final);return{n:f.length,max:Math.max(...f),med:(f.reduce((a,b)=>a+b)/f.length).toFixed(2),pct:Math.round(100*f.filter(x=>x>=5).length/f.length)};}
+function recs(r){const l=[];
+ if(r.ua>=3)l.push("Braço: reduzir elevação e abdução, aproximar a carga do corpo, ajustar a altura da bancada e usar apoio de antebraço.");
+ if(r.la>=2)l.push("Antebraço: manter o cotovelo entre 60° e 100° e evitar cruzar a linha média do corpo.");
+ if(r.wr>=3)l.push("Punho: manter posição neutra e revisar ferramentas, teclado e mouse.");
+ if(r.neck>=3)l.push("Pescoço: elevar o plano de visão (monitor/peça) e evitar flexão e giro prolongados.");
+ if(r.trunk>=3)l.push("Tronco: ajustar altura e alcance, usar assento com encosto e evitar inclinação e torção.");
+ if(r.legs>=2)l.push("Pernas: garantir apoio estável dos dois pés e distribuição de peso.");
+ if(r.force>0)l.push("Carga: reduzir peso/força, usar auxílio mecânico e dividir a tarefa.");
+ if(r.muscle)l.push("Uso muscular: incluir pausas e rodízio para quebrar a postura estática ou repetitiva.");
+ if(!l.length)l.push("Manter as boas práticas atuais e reavaliar sempre que houver mudança no posto ou na tarefa.");
+ return l;}
+$("xl").onclick=()=>{const r=need();if(!r)return;const i=info(),s=stats(),wb=XLSX.utils.book_new(),add=(n,a)=>XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(a),n);
+ add("Resumo",[["ErgoApp - Relatório RULA"],["Data",i.data],["Empresa",i.emp],["Setor",i.set],["Trabalhador",i.trab],["Avaliador",i.aval],[],["Vista",r.view],["Lado avaliado",r.side.toUpperCase()],["Escore final",r.final],["Classificação",RISK[r.final]],["Conclusão",RT[r.final]],...(s?[[],["Quadros analisados",s.n],["RULA máximo",s.max],["RULA médio",+s.med],["% quadros com RULA >= 5",s.pct]]:[])]);
+ add("Cruzamento A-B-C",[["Etapa","Pontos"],...steps(r)]);
+ add("Ângulos",[["Medida","Graus"],["Flexão do braço",+r.flex.toFixed(1)],["Cotovelo",+r.elbow.toFixed(1)],["Desvio do punho",+r.dev.toFixed(1)],["Flexão do pescoço",+r.nflex.toFixed(1)],["Flexão do tronco",+r.tfl.toFixed(1)]]);
+ add("Histórico",[["Tempo (s)","Vista","RULA","Escore A","Escore B","Braço","Antebraço","Punho","Pescoço","Tronco","Pernas"],...hist.map(h=>[h.t,h.view,h.final,h.A,h.B,h.ua,h.la,h.wr,h.neck,h.trunk,h.legs])]);
+ add("Tabela C",[["A / B",1,2,3,4,5,6,7],...TC.map((x,k)=>[k+1,...x])]);
+ XLSX.writeFile(wb,"ergoapp_rula.xlsx");};
+function pdf(laudo){const r=need();if(!r)return;const {jsPDF}=window.jspdf,d=new jsPDF({unit:"pt",format:"a4"}),i=info(),s=stats();let y=50;
+ const T=(t,z=10,b=0,g=4)=>{d.setFont("helvetica",b?"bold":"normal");d.setFontSize(z);const l=d.splitTextToSize(String(t),500);if(y+l.length*(z+3)>790){d.addPage();y=50;}d.text(l,48,y);y+=l.length*(z+3)+g;};
+ const R=(a,b)=>{if(y>790){d.addPage();y=50;}d.setFont("helvetica","normal");d.setFontSize(10);d.text(String(a),48,y);d.text(String(b),420,y);d.setDrawColor(210);d.line(48,y+3,548,y+3);y+=16;};
+ T(laudo?"LAUDO ERGONÔMICO - MÉTODO RULA":"RELATÓRIO DE ANÁLISE POSTURAL - MÉTODO RULA",15,1,10);
+ if(laudo)T("1. Identificação",12,1);
+ [["Data",i.data],["Empresa",i.emp],["Setor/posto",i.set],["Trabalhador avaliado",i.trab],["Avaliador",i.aval]].forEach(x=>R(...x));y+=8;
+ if(laudo){T("2. Metodologia",12,1);T("Avaliação postural pelo método RULA (Rapid Upper Limb Assessment - McAtamney e Corlett, 1993), com detecção de pontos anatômicos por visão computacional (MediaPipe Pose) e cálculo de ângulos em 3D. As posturas dos segmentos são pontuadas e cruzadas nas Tabelas A (braço, antebraço, punho e giro), B (pescoço, tronco e pernas) e C, resultando no escore final de 1 a 7.",10,0,8);}
+ T(laudo?"3. Resultados":"Resultados",12,1);
+ try{const w=300,h=w*c2.height/c2.width;if(y+h>790){d.addPage();y=50;}d.addImage(c2.toDataURL("image/jpeg",.8),"JPEG",48,y,w,h);y+=h+10;}catch(e){}
+ R("Vista / lado avaliado",r.view+" / "+r.side.toUpperCase());steps(r).forEach(x=>R(...x));y+=8;
+ if(s)T(`Análise de ${s.n} quadros: RULA máximo ${s.max}, médio ${s.med}; ${s.pct}% dos quadros com escore igual ou superior a 5.`,10,0,8);
+ T((laudo?"4. Classificação e conclusão":"Classificação")+": nível de risco "+r.final+" - "+RISK[r.final],12,1);T(RT[r.final],10,0,8);
+ if(laudo){T("5. Recomendações",12,1);recs(r).forEach(x=>T("- "+x));
+  T("6. Limitações",12,1,4);T("Análise automatizada a partir de imagem 2D: o giro do punho e o desvio radial/ulnar não são medidos pelo modelo; ombro elevado, braço apoiado, carga e uso muscular são informados manualmente. O resultado é uma triagem e deve ser validado por profissional habilitado, podendo ser complementado por Análise Ergonômica do Trabalho (NR-17).");
+  y+=40;if(y>770){d.addPage();y=60;}d.line(48,y,300,y);y+=12;T("Responsável técnico (nome, formação e registro profissional)",9);}
+ d.save(laudo?"ergoapp_laudo_ergonomico.pdf":"ergoapp_relatorio_rula.pdf");}
+$("pdf").onclick=()=>pdf(false);$("laudo").onclick=()=>pdf(true);
+
+init();
+</script></body></html>
